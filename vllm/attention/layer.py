@@ -91,6 +91,7 @@ class Attention(nn.Module):
         # but requires q to be quantized as well.
         self._q_scale = torch.tensor(1.0, dtype=torch.float32)
         self._prob_scale = torch.tensor(1.0, dtype=torch.float32)
+        self._out_scale = None
 
         # We also keep the float32 versions of k/v_scale for attention
         # backends that don't support tensors (Flashinfer)
@@ -190,8 +191,10 @@ class Attention(nn.Module):
         if self.use_output:
             output_shape = (output_shape
                             if output_shape is not None else query.shape)
+            output_dtype = (query.dtype if self._out_scale is None else
+                            current_platform.fp8_dtype())
             output = torch.empty(output_shape,
-                                 dtype=query.dtype,
+                                 dtype=output_dtype,
                                  device=query.device)
             hidden_size = output_shape[-1]
             # We skip reshaping query, key and value tensors for the MLA

@@ -47,7 +47,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "    str kv_cache_dtype, Tensor k_scale, Tensor v_scale,"
       "    int tp_rank, int blocksparse_local_blocks,"
       "    int blocksparse_vert_stride, int blocksparse_block_size,"
-      "    int blocksparse_head_sliding_step) -> ()");
+      "    int blocksparse_head_sliding_step,"
+      "    int num_threads) -> ()");
   ops.impl("paged_attention_v1", torch::kCUDA, &paged_attention_v1);
 
   // PagedAttention V2.
@@ -61,7 +62,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "    str kv_cache_dtype, Tensor k_scale, Tensor v_scale,"
       "    int tp_rank, int blocksparse_local_blocks,"
       "    int blocksparse_vert_stride, int blocksparse_block_size,"
-      "    int blocksparse_head_sliding_step) -> ()");
+      "    int blocksparse_head_sliding_step,"
+      "    int num_threads) -> ()");
   ops.impl("paged_attention_v2", torch::kCUDA, &paged_attention_v2);
 
 #ifndef USE_ROCM
@@ -106,6 +108,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Activation function used in SwiGLU.
   ops.def("silu_and_mul(Tensor! result, Tensor input) -> ()");
   ops.impl("silu_and_mul", torch::kCUDA, &silu_and_mul);
+
+  // Activation function used in SwiGLU.
+  ops.def("scaled_silu_and_mul(Tensor! out, Tensor input, Tensor scale) -> ()");
+  ops.impl("scaled_silu_and_mul", torch::kCUDA, &scaled_silu_and_mul);
 
   ops.def(
       "silu_and_mul_quant(Tensor! result, Tensor input, Tensor scale) -> ()");
@@ -482,41 +488,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "                   Tensor page_table, float scale) -> ()");
   ops.impl("cutlass_mla_decode", torch::kCUDA, &cutlass_mla_decode);
 
-  // Mamba selective scan kernel
-  ops.def(
-      "selective_scan_fwd(Tensor! u, Tensor! delta,"
-      "Tensor! A, Tensor! B, Tensor! C,"
-      "Tensor? D_, Tensor!? z_, Tensor? delta_bias_,"
-      "bool delta_softplus,"
-      "Tensor? query_start_loc,"
-      "Tensor? cache_indices,"
-      "Tensor? has_initial_state,"
-      "Tensor! ssm_states,"
-      "int pad_slot_id) -> ()");
-  ops.impl("selective_scan_fwd", torch::kCUDA, &selective_scan_fwd);
-
-  ops.def(
-      "causal_conv1d_update(Tensor! x,"
-      "Tensor! conv_state,"
-      "Tensor! weight,"
-      "Tensor? bias_,"
-      "bool silu_activation,"
-      "Tensor? cache_seqlens_,"
-      "Tensor? conv_state_indices,"
-      "int pad_slot_id) -> ()");
-  ops.impl("causal_conv1d_update", torch::kCUDA, &causal_conv1d_update);
-
-  ops.def(
-      "causal_conv1d_fwd(Tensor! x, Tensor! weight,"
-      "Tensor? bias_,"
-      "Tensor!? conv_states,"
-      "Tensor? query_start_loc,"
-      "Tensor? cache_indices,"
-      "Tensor? has_initial_state,"
-      "bool silu_activation,"
-      "int pad_slot_id) -> ()");
-  ops.impl("causal_conv1d_fwd", torch::kCUDA, &causal_conv1d_fwd);
-
   // Compute NVFP4 block quantized tensor.
   ops.def(
       "scaled_fp4_quant(Tensor! output, Tensor input,"
@@ -583,6 +554,41 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor!? azp) -> ()");
   ops.impl("dynamic_scaled_int8_quant", torch::kCUDA,
            &dynamic_scaled_int8_quant);
+
+  // Mamba selective scan kernel
+  ops.def(
+      "selective_scan_fwd(Tensor! u, Tensor! delta,"
+      "Tensor! A, Tensor! B, Tensor! C,"
+      "Tensor? D_, Tensor!? z_, Tensor? delta_bias_,"
+      "bool delta_softplus,"
+      "Tensor? query_start_loc,"
+      "Tensor? cache_indices,"
+      "Tensor? has_initial_state,"
+      "Tensor! ssm_states,"
+      "int pad_slot_id) -> ()");
+  ops.impl("selective_scan_fwd", torch::kCUDA, &selective_scan_fwd);
+
+  ops.def(
+      "causal_conv1d_update(Tensor! x,"
+      "Tensor! conv_state,"
+      "Tensor! weight,"
+      "Tensor? bias_,"
+      "bool silu_activation,"
+      "Tensor? cache_seqlens_,"
+      "Tensor? conv_state_indices,"
+      "int pad_slot_id) -> ()");
+  ops.impl("causal_conv1d_update", torch::kCUDA, &causal_conv1d_update);
+
+  ops.def(
+      "causal_conv1d_fwd(Tensor! x, Tensor! weight,"
+      "Tensor? bias_,"
+      "Tensor!? conv_states,"
+      "Tensor? query_start_loc,"
+      "Tensor? cache_indices,"
+      "Tensor? has_initial_state,"
+      "bool silu_activation,"
+      "int pad_slot_id) -> ()");
+  ops.impl("causal_conv1d_fwd", torch::kCUDA, &causal_conv1d_fwd);
 
 #ifndef USE_ROCM
   // reorder weight for AllSpark Ampere W8A16 Fused Gemm kernel

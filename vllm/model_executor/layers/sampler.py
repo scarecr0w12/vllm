@@ -21,6 +21,7 @@ from vllm.sequence import (VLLM_INVALID_TOKEN_ID,
                            CompletionSequenceGroupOutput, Logprob,
                            PromptLogprobs, SampleLogprobs, SequenceOutput)
 from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
+from vllm.utils import rpd_mark
 
 if envs.VLLM_USE_FLASHINFER_SAMPLER and find_spec("flashinfer"):
     # yapf: disable
@@ -70,6 +71,7 @@ class SampleResultArgsType:
     multinomial_samples: MultinomialSamplesType
     sample_results_dict: SampleResultsDictType
     sampling_metadata: SamplingMetadata
+    forced_samples: Optional[torch.Tensor]
     greedy_samples: Optional[torch.Tensor]
 
 
@@ -221,6 +223,7 @@ class Sampler(nn.Module):
         self._do_top_p_top_k = do_top_p_top_k
         self._do_min_p = do_min_p
 
+    @rpd_mark(name="Sampler Forward")
     def forward(
         self,
         logits: torch.Tensor,
@@ -228,17 +231,19 @@ class Sampler(nn.Module):
     ) -> Optional[SamplerOutput]:
         """
         Single-step scheduling:
-        * Perform GPU-side sampling computation & compute
-          GPU-side logprobs tensor
-        * Pythonize sampling result & logprobs tensor
+            * Perform GPU-side sampling computation & compute
+            GPU-side logprobs tensor
+            * Pythonize sampling result & logprobs tensor
 
         Multi-step scheduling:
-        * Perform GPU-side sampling computation & compute
-          GPU-side logprobs tensor
-        * Defer Pythonization of sampling result & logprobs
-          tensor
-        * Encapsulate arguments required for deferred Pythonization
-          in the {class}`SamplerOutput` structure
+            * Perform GPU-side sampling computation & compute
+            GPU-side logprobs tensor
+            * Defer Pythonization of sampling result & logprobs
+            tensor
+            * Encapsulate arguments required for deferred Pythonization
+            in the
+            [`SamplerOutput`][vllm.model_executor.layers.sampler.SamplerOutput]
+            structure
 
         Args:
             logits: (num_tokens, vocab_size).
@@ -473,6 +478,39 @@ def _greedy_sample(
     return results
 
 
+def _forced_sample(
+    selected_seq_groups: list[SequenceGroupToSample],
+    samples: torch.Tensor,
+) -> list[tuple[list[int], list[int]]]:
+    """Run forced sampling on a given samples.
+    Args:
+        selected_seq_groups: A list of sequence groups batched.
+        samples: (num_selected_samples,) A tensor of samples. The length of
+            samples could be smaller than selected_seq_groups if
+            seq_group.do_sample is False.
+    Returns:
+        Tuple of (next_token_ids, parent_ids). The length of returned list is
+        same as the length of selected_seq_groups. If the corresponding
+        seq_group has do_sample=False, tuple contains ([], [])
+        
+        The next_token_ids is guided (forced) by the id containing in the 
+        sampling_parameters.future_context property.
+    """
+    samples = samples.tolist()
+    sample_idx = 0
+    results = []
+    for seq_group in selected_seq_groups:
+        seq_ids = seq_group.seq_ids
+        num_parent_seqs = len(seq_ids)
+        assert num_parent_seqs == 1, (
+            "Deterministic sampling should have only one seq.")
+        parent_ids = list(range(num_parent_seqs))
+        next_token_ids = [samples[sample_idx]]
+        results.append((next_token_ids, parent_ids))
+        sample_idx += num_parent_seqs
+    return results
+
+
 def _random_sample(
     selected_seq_groups: list[SequenceGroupToSample],
     random_samples: torch.Tensor,
@@ -580,12 +618,14 @@ def get_pythonized_sample_results(
     (
         sample_metadata,
         sampling_metadata,
+        forced_samples,
         greedy_samples,
         multinomial_samples,
         sample_results_dict,
     ) = (
         sample_result_args.sample_metadata,
         sample_result_args.sampling_metadata,
+        sample_result_args.forced_samples,
         sample_result_args.greedy_samples,
         sample_result_args.multinomial_samples,
         sample_result_args.sample_results_dict,
@@ -600,6 +640,8 @@ def get_pythonized_sample_results(
         elif sampling_type in (SamplingType.RANDOM, SamplingType.RANDOM_SEED):
             sample_results = _random_sample(seq_groups,
                                             multinomial_samples[sampling_type])
+        elif sampling_type == SamplingType.FORCED:
+            sample_results = _forced_sample(seq_groups, forced_samples)
         sample_results_dict.update(zip(seq_group_id, sample_results))
 
     return [
@@ -641,6 +683,7 @@ def _sample_with_torch(
     sample_results_dict: SampleResultsDictType = {}
     sample_metadata: SampleMetadataType = {}
     multinomial_samples: MultinomialSamplesType = {}
+    forced_samples: Optional[torch.Tensor] = None
     greedy_samples: Optional[torch.Tensor] = None
 
     # Create output tensor for sampled token ids.
@@ -704,6 +747,23 @@ def _sample_with_torch(
                 # Store sampled tokens in output tensor.
                 sampled_token_ids_tensor[long_sample_indices] = \
                     multinomial_samples[sampling_type].to(torch.long)
+        elif sampling_type == SamplingType.FORCED:
+            forced_samples = torch.tensor([], dtype=torch.int32)
+            for sgidx in range(len(seq_groups)):
+                if (seq_groups[sgidx].sampling_params.future_context
+                        is not None):
+                    forced_sample = torch.tensor([
+                        seq_groups[sgidx].sampling_params.future_context[sgidx]
+                        [min(
+                            len(sampling_metadata.seq_groups[sgidx].seq_data[
+                                sampling_params.cntr[sgidx]].output_token_ids),
+                            len(seq_groups[sgidx].sampling_params.
+                                future_context[sgidx]) - 1)]
+                    ])
+                else:
+                    forced_sample = torch.argmax(logprobs[long_sample_indices],
+                                                 dim=-1)
+                forced_samples = torch.cat([forced_samples, forced_sample])
 
         else:
             raise ValueError(f"Unsupported sampling type: {sampling_type}")
@@ -713,6 +773,7 @@ def _sample_with_torch(
     maybe_deferred_args = SampleResultArgsType(
         sampling_metadata=sampling_metadata,
         sample_metadata=sample_metadata,
+        forced_samples=forced_samples,
         multinomial_samples=multinomial_samples,
         greedy_samples=greedy_samples,
         sample_results_dict=sample_results_dict)
@@ -732,6 +793,7 @@ def _sample_with_torch(
         )
 
 
+@rpd_mark()
 def _sample(
     probs: torch.Tensor,
     logprobs: torch.Tensor,

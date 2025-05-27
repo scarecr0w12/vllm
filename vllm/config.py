@@ -46,8 +46,9 @@ from vllm.utils import (DEFAULT_MAX_NUM_BATCHED_TOKENS,
                         MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS,
                         POOLING_MODEL_MAX_NUM_BATCHED_TOKENS, GiB_bytes,
                         LayerBlockType, cuda_device_count_stateless,
-                        get_cpu_memory, get_open_port, is_torch_equal_or_newer,
-                        random_uuid, resolve_obj_by_qualname)
+                        get_cpu_memory, get_open_port, is_mi250, is_navi,
+                        is_torch_equal_or_newer, random_uuid,
+                        resolve_obj_by_qualname)
 
 if TYPE_CHECKING:
     from _typeshed import DataclassInstance
@@ -542,8 +543,10 @@ class ModelConfig:
         sliding_window = getattr(self.hf_text_config, "sliding_window", None)
         sliding_window_pattern = getattr(self.hf_text_config,
                                          "sliding_window_pattern", None)
+        has_interleaved_attention = sliding_window_pattern is not None or (
+            isinstance(sliding_window, list))
 
-        if not (self.disable_sliding_window or sliding_window_pattern is None):
+        if not self.disable_sliding_window and has_interleaved_attention:
             if (backend :=
                     envs.VLLM_ATTENTION_BACKEND) in ("XFORMERS", "FLASHINFER"):
                 sliding_window_len_min = get_min_sliding_window(
@@ -563,7 +566,10 @@ class ModelConfig:
                 # only the attention layer itself is aware of the sliding
                 # window, and use the window size to compute the attention.
                 self.hf_text_config.interleaved_sliding_window = sliding_window
-                delattr(self.hf_text_config, "sliding_window")
+
+                if hasattr(self.hf_text_config, "sliding_window"):
+                    delattr(self.hf_text_config, "sliding_window")
+
                 sliding_window = None
 
         self.max_model_len = _get_and_verify_max_len(
@@ -1041,7 +1047,8 @@ class ModelConfig:
             if self.use_async_output_proc:
                 self.use_async_output_proc = False
 
-    def get_hf_config_sliding_window(self) -> Optional[int]:
+    def get_hf_config_sliding_window(
+            self) -> Union[Optional[int], list[Optional[int]]]:
         """Get the sliding window size, or None if disabled."""
 
         # Some models, like Qwen2 and Qwen1.5, use `use_sliding_window` in
@@ -1052,7 +1059,7 @@ class ModelConfig:
             return None
         return getattr(self.hf_text_config, "sliding_window", None)
 
-    def get_sliding_window(self) -> Optional[int]:
+    def get_sliding_window(self) -> Optional[Union[int, list[Optional[int]]]]:
         """Get the sliding window size, or None if disabled.
         """
         # If user disables sliding window, return None.
@@ -1874,6 +1881,18 @@ class ParallelConfig:
 
         self._verify_args()
 
+        if is_mi250() and self.tensor_parallel_size > 1:
+            self.disable_custom_all_reduce = True
+            logger.info(
+                "Disabled the custom all-reduce kernel because it is not "
+                "working correctly on multi AMD MI250.")
+
+        if is_navi() and self.tensor_parallel_size <= 2:
+            self.disable_custom_all_reduce = True
+            logger.info(
+                "Disabled the custom all-reduce kernel because it is not "
+                "working correctly when using two AMD Navi GPUs.")
+
     @property
     def use_ray(self) -> bool:
         return self.distributed_executor_backend == "ray" or (
@@ -1883,7 +1902,6 @@ class ParallelConfig:
     def _verify_args(self) -> None:
         # Lazy import to avoid circular import
         from vllm.executor.executor_base import ExecutorBase
-        from vllm.platforms import current_platform
         if self.distributed_executor_backend not in (
                 "ray", "mp", "uni",
                 "external_launcher", None) and not (isinstance(
@@ -2980,7 +2998,7 @@ class PoolerConfig:
     pooling_type: Optional[str] = None
     """
     The pooling method of the pooling model. This should be a key in
-    {class}`vllm.model_executor.layers.pooler.PoolingType`.
+    [`vllm.model_executor.layers.pooler.PoolingType`][].
     """
 
     normalize: Optional[bool] = None
@@ -3691,23 +3709,27 @@ class CompilationConfig:
     """Configuration for compilation. It has three parts:
 
     - Top-level Compilation control:
-        - {attr}`level`
-        - {attr}`debug_dump_path`
-        - {attr}`cache_dir`
-        - {attr}`backend`
-        - {attr}`custom_ops`
-        - {attr}`splitting_ops`
+        - [`level`][vllm.config.CompilationConfig.level]
+        - [`debug_dump_path`][vllm.config.CompilationConfig.debug_dump_path]
+        - [`cache_dir`][vllm.config.CompilationConfig.cache_dir]
+        - [`backend`][vllm.config.CompilationConfig.backend]
+        - [`custom_ops`][vllm.config.CompilationConfig.custom_ops]
+        - [`splitting_ops`][vllm.config.CompilationConfig.splitting_ops]
     - CudaGraph capture:
-        - {attr}`use_cudagraph`
-        - {attr}`cudagraph_capture_sizes`
-        - {attr}`cudagraph_num_of_warmups`
-        - {attr}`cudagraph_copy_inputs`
-        - {attr}`full_cuda_graph`
+        - [`use_cudagraph`][vllm.config.CompilationConfig.use_cudagraph]
+        - [`cudagraph_capture_sizes`]
+        [vllm.config.CompilationConfig.cudagraph_capture_sizes]
+        - [`cudagraph_num_of_warmups`]
+        [vllm.config.CompilationConfig.cudagraph_num_of_warmups]
+        - [`cudagraph_copy_inputs`]
+        [vllm.config.CompilationConfig.cudagraph_copy_inputs]
+        - [`full_cuda_graph`][vllm.config.CompilationConfig.full_cuda_graph]
     - Inductor compilation:
-        - {attr}`use_inductor`
-        - {attr}`compile_sizes`
-        - {attr}`inductor_compile_config`
-        - {attr}`inductor_passes`
+        - [`use_inductor`][vllm.config.CompilationConfig.use_inductor]
+        - [`compile_sizes`][vllm.config.CompilationConfig.compile_sizes]
+        - [`inductor_compile_config`]
+        [vllm.config.CompilationConfig.inductor_compile_config]
+        - [`inductor_passes`][vllm.config.CompilationConfig.inductor_passes]
         - custom inductor passes
 
     Why we have different sizes for cudagraph and inductor:
@@ -4303,6 +4325,11 @@ class VllmConfig:
             # FIXME(rob): Add function to set all of these.
             if not self.compilation_config.custom_ops:
                 self.compilation_config.custom_ops = ["none"]
+            if current_platform.is_rocm():
+                if "none" in self.compilation_config.custom_ops:
+                    self.compilation_config.custom_ops.remove("none")
+                self.compilation_config.custom_ops.append("+rms_norm")
+                self.compilation_config.custom_ops.append("+silu_and_mul")
             self.compilation_config.use_cudagraph = True
             self.compilation_config.use_inductor = True
             self.compilation_config.cudagraph_num_of_warmups = 1

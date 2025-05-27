@@ -98,7 +98,9 @@ steps:
   - VLLM_ATTENTION_BACKEND=FLASH_ATTN pytest -v -s basic_correctness/test_chunked_prefill.py
 
 - label: Core Test # 10min
+  working_dir: "/vllm-workspace/tests"
   mirror_hardwares: [amdexperimental, amdproduction]
+  amd_gpus: 4   # Just for the sake of queue testing
   fast_check: true
   source_file_dependencies:
   - vllm/core
@@ -112,6 +114,7 @@ steps:
   working_dir: "/vllm-workspace/tests"
   fast_check: true
   torch_nightly: true
+  amd_gpus: 2   # Just for the sake of queue testing
   source_file_dependencies:
   - vllm/
   - tests/entrypoints/llm
@@ -203,6 +206,7 @@ steps:
   - pytest -v -s engine test_sequence.py test_config.py test_logger.py
   # OOM in the CI unless we run this separately
   - pytest -v -s tokenization
+  working_dir: "/vllm-workspace/tests" # optional
 
 - label: V1 Test
   mirror_hardwares: [amdexperimental]
@@ -222,6 +226,7 @@ steps:
     - pytest -v -s v1/test_serial_utils.py
     - pytest -v -s v1/test_utils.py
     - pytest -v -s v1/test_oracle.py
+    - pytest -v -s v1/test_metrics_reader.py
     # TODO: accuracy does not match, whether setting
     # VLLM_USE_FLASHINFER_SAMPLER or not on H100.
     - pytest -v -s v1/e2e
@@ -246,7 +251,7 @@ steps:
     - python3 offline_inference/vision_language.py --seed 0
     - python3 offline_inference/vision_language_embedding.py --seed 0
     - python3 offline_inference/vision_language_multi_image.py --seed 0
-    - VLLM_USE_V1=0 python3 other/tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 other/tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
+    - VLLM_USE_V1=0 python3 others/tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 others/tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
     - python3 offline_inference/encoder_decoder.py
     - python3 offline_inference/encoder_decoder_multimodal.py --model-type whisper --seed 0
     - python3 offline_inference/basic/classify.py
@@ -255,6 +260,7 @@ steps:
     - VLLM_USE_V1=0 python3 offline_inference/profiling.py --model facebook/opt-125m run_num_steps --num-steps 2
 
 - label: Prefix Caching Test # 9min
+  working_dir: "/vllm-workspace/tests"
   mirror_hardwares: [amdexperimental, amdproduction]
   source_file_dependencies:
   - vllm/
@@ -274,6 +280,7 @@ steps:
     - VLLM_USE_FLASHINFER_SAMPLER=1 pytest -v -s samplers
 
 - label: LogitsProcessor Test # 5min
+  working_dir: "/vllm-workspace/tests"
   mirror_hardwares: [amdexperimental, amdproduction]
   source_file_dependencies:
   - vllm/model_executor/layers
@@ -296,7 +303,9 @@ steps:
     - pytest -v -s spec_decode/e2e/test_eagle_correctness.py
 
 - label: LoRA Test %N # 15min each
+  working_dir: "/vllm-workspace/tests"
   mirror_hardwares: [amdexperimental]
+  amd_gpus: 8
   source_file_dependencies:
   - vllm/lora
   - tests/lora
@@ -337,8 +346,10 @@ steps:
   commands:
   - pytest -v -s compile/test_full_graph.py
 
-- label: Kernels Core Operation Test
-  mirror_hardwares: [amdexperimental, amdproduction]
+- label: Kernels Test %N # 1h each
+  working_dir: "/vllm-workspace/tests"
+  # mirror_hardwares: [amdexperimental, amdproduction]
+  amd_gpus: 8
   source_file_dependencies:
   - csrc/
   - tests/kernels/core
@@ -384,6 +395,7 @@ steps:
     - pytest -v -s kernels/mamba
 
 - label: Tensorizer Test # 11min
+  working_dir: "/vllm-workspace/tests"
   mirror_hardwares: [amdexperimental, amdproduction]
   soft_fail: true
   source_file_dependencies:
@@ -449,6 +461,7 @@ steps:
     - pytest -v -s encoder_decoder
 
 - label: OpenAI-Compatible Tool Use # 20 min
+  working_dir: "/vllm-workspace/tests" 
   mirror_hardwares: [amdexperimental]
   fast_check: false
   source_file_dependencies:
@@ -486,16 +499,25 @@ steps:
     - pip freeze | grep -E 'torch'
     - pytest -v -s models/language -m core_model
 
-- label: Language Models Test (Extended)
+- label: Language Models Test (Extended Generation) # 1hr20min
   mirror_hardwares: [amdexperimental]
   optional: true
   source_file_dependencies:
   - vllm/
-  - tests/models/language
+  - tests/models/language/generation
   commands:
     # Install causal-conv1d for plamo2 models here, as it is not compatible with pip-compile.
     - pip install 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.0.post8'
-    - pytest -v -s models/language -m 'not core_model'
+    - pytest -v -s models/language/generation -m 'not core_model'
+
+- label: Language Models Test (Extended Pooling)  # 36min
+  mirror_hardwares: [amdexperimental]
+  optional: true
+  source_file_dependencies:
+  - vllm/
+  - tests/models/language/pooling
+  commands:
+    - pytest -v -s models/language/pooling -m 'not core_model'
 
 - label: Multi-Modal Models Test (Standard)
   mirror_hardwares: [amdexperimental]

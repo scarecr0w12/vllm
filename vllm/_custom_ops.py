@@ -11,6 +11,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType
+from vllm.utils import is_navi
 
 logger = init_logger(__name__)
 
@@ -63,7 +64,9 @@ def paged_attention_v1(
         seq_lens, block_size, max_seq_len, alibi_slopes, kv_cache_dtype,
         k_scale, v_scale, tp_rank, blocksparse_local_blocks,
         blocksparse_vert_stride, blocksparse_block_size,
-        blocksparse_head_sliding_step)
+        blocksparse_head_sliding_step,
+        num_threads = 1024 if current_platform.is_rocm() \
+            and not is_navi() else 128)
 
 
 def paged_attention_v2(
@@ -95,7 +98,9 @@ def paged_attention_v2(
         num_kv_heads, scale, block_tables, seq_lens, block_size, max_seq_len,
         alibi_slopes, kv_cache_dtype, k_scale, v_scale, tp_rank,
         blocksparse_local_blocks, blocksparse_vert_stride,
-        blocksparse_block_size, blocksparse_head_sliding_step)
+        blocksparse_block_size, blocksparse_head_sliding_step,
+        num_threads = 1024 if current_platform.is_rocm() \
+            and not is_navi() else 128)
 
 
 def paged_attention_rocm(
@@ -279,6 +284,19 @@ def rms_norm(out: torch.Tensor, input: torch.Tensor, weight: torch.Tensor,
 def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
                        weight: torch.Tensor, epsilon: float) -> None:
     torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
+
+
+def scaled_rms_norm(out: torch.Tensor, input: torch.Tensor,
+                    weight: torch.Tensor, scale: torch.Tensor,
+                    epsilon: float) -> None:
+    torch.ops._C.rms_norm_static_fp8_quant(out, input, weight, scale, epsilon)
+
+
+def scaled_fused_add_rms_norm(out: torch.Tensor, input: torch.Tensor,
+                              residual: torch.Tensor, weight: torch.Tensor,
+                              scale: torch.Tensor, epsilon: float) -> None:
+    torch.ops._C.fused_add_rms_norm_static_fp8_quant(out, input, residual,
+                                                     weight, scale, epsilon)
 
 
 def advance_step_flashattn(num_seqs: int, num_queries: int, block_size: int,
@@ -1667,6 +1685,11 @@ def open_mem_handle(mem_handle: torch.Tensor):
 
 def free_shared_buffer(ptr: int) -> None:
     torch.ops._C_custom_ar.free_shared_buffer(ptr)
+
+
+def LLMM_Silu(a: torch.Tensor, b: torch.Tensor, out: torch.Tensor,
+              rows_per_block: int) -> None:
+    torch.ops._rocm_C.LLMM_Silu(a, b, out, rows_per_block)
 
 
 def get_flash_mla_metadata(

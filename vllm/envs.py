@@ -14,7 +14,11 @@ if TYPE_CHECKING:
     VLLM_RINGBUFFER_WARNING_INTERVAL: int = 60
     VLLM_NCCL_SO_PATH: Optional[str] = None
     LD_LIBRARY_PATH: Optional[str] = None
-    VLLM_USE_TRITON_FLASH_ATTN: bool = False
+    VLLM_USE_SDPA_ATTENTION: bool = False
+    VLLM_USE_TRITON_FLASH_ATTN: bool = True
+    VLLM_USE_ROCM_CUSTOM_PAGED_ATTN_FP8_OUT: bool = True
+    VLLM_USE_ROCM_FP8_FLASH_ATTN: bool = False
+    VLLM_V1_USE_PREFILL_DECODE_ATTENTION: bool = False
     VLLM_FLASH_ATTN_VERSION: Optional[int] = None
     LOCAL_RANK: int = 0
     CUDA_VISIBLE_DEVICES: Optional[str] = None
@@ -71,6 +75,7 @@ if TYPE_CHECKING:
     VLLM_PLUGINS: Optional[list[str]] = None
     VLLM_LORA_RESOLVER_CACHE_DIR: Optional[str] = None
     VLLM_TORCH_PROFILER_DIR: Optional[str] = None
+    VLLM_RPD_PROFILER_DIR: Optional[str] = None
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
@@ -285,6 +290,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "LD_LIBRARY_PATH":
     lambda: os.environ.get("LD_LIBRARY_PATH", None),
 
+    # flag to control if vllm should use naive scaled dot-product attention
+    "VLLM_USE_SDPA_ATTENTION":
+    lambda: (os.environ.get("VLLM_USE_SDPA_ATTENTION", "False").lower() in
+             ("true", "1")),
+
     # flag to control if vllm should use triton flash attention
     "VLLM_USE_TRITON_FLASH_ATTN":
     lambda: (os.environ.get("VLLM_USE_TRITON_FLASH_ATTN", "True").lower() in
@@ -299,6 +309,24 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE":
     lambda: bool(
         os.environ.get("VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE", "1") != "0"),
+
+    # have custom paged attention implemented for MI3* cards write out fp8
+    "VLLM_USE_ROCM_CUSTOM_PAGED_ATTN_FP8_OUT":
+    lambda:
+    (os.getenv("VLLM_USE_ROCM_CUSTOM_PAGED_ATTN_FP8_OUT", "True").lower() in
+     ("true", "1")),
+
+    # use quantized q,k,v,softmax(qk^T), attn output during prefill
+    "VLLM_USE_ROCM_FP8_FLASH_ATTN":
+    lambda: (os.getenv("VLLM_USE_ROCM_FP8_FLASH_ATTN", "False").lower() in
+             ("true", "1")),
+
+    # Use separate prefill and decode kernels for V1 attention instead of
+    # the unified triton kernel.
+    "VLLM_V1_USE_PREFILL_DECODE_ATTENTION":
+    lambda:
+    (os.getenv("VLLM_V1_USE_PREFILL_DECODE_ATTENTION", "False").lower() in
+     ("true", "1")),
 
     # Internal flag to enable/disable Inductor standalone compile
     "VLLM_TEST_STANDALONE_COMPILE":
@@ -323,8 +351,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # Whether to log responses from API Server for debugging
     "VLLM_DEBUG_LOG_API_SERVER_RESPONSE":
-    lambda: os.environ.get("VLLM_DEBUG_LOG_API_SERVER_RESPONSE", "False").
-    lower() == "true",
+    lambda: os.environ.get("VLLM_DEBUG_LOG_API_SERVER_RESPONSE", "False"
+                           ).lower() == "true",
 
     # S3 access information, used for tensorizer to load model from S3
     "S3_ACCESS_KEY_ID":
@@ -507,7 +535,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_XLA_CHECK_RECOMPILATION":
     lambda: bool(int(os.getenv("VLLM_XLA_CHECK_RECOMPILATION", "0"))),
     "VLLM_FUSED_MOE_CHUNK_SIZE":
-    lambda: int(os.getenv("VLLM_FUSED_MOE_CHUNK_SIZE", "32768")),
+    lambda: int(os.getenv("VLLM_FUSED_MOE_CHUNK_SIZE", "65536")),
 
     # If set, vllm will skip the deprecation warnings.
     "VLLM_NO_DEPRECATION_WARNING":
@@ -559,6 +587,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TORCH_PROFILER_DIR":
     lambda: (None if os.getenv("VLLM_TORCH_PROFILER_DIR", None) is None else os
              .path.expanduser(os.getenv("VLLM_TORCH_PROFILER_DIR", "."))),
+
+    # Enables rpd profiler if set. Path to the directory where torch profiler
+    # traces are saved. Note that it must be an absolute path.
+    "VLLM_RPD_PROFILER_DIR":
+    lambda: (None if os.getenv("VLLM_RPD_PROFILER_DIR", None) is None else os.
+             path.expanduser(os.getenv("VLLM_RPD_PROFILER_DIR", "."))),
 
     # If set, vLLM will use Triton implementations of AWQ.
     "VLLM_USE_TRITON_AWQ":

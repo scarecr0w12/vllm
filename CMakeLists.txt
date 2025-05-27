@@ -179,9 +179,6 @@ include(FetchContent)
 file(MAKE_DIRECTORY ${FETCHCONTENT_BASE_DIR}) # Ensure the directory exists
 message(STATUS "FetchContent base directory: ${FETCHCONTENT_BASE_DIR}")
 
-#
-# Set rocm version dev int.
-#
 if(VLLM_GPU_LANG STREQUAL "HIP")
   #
   # Overriding the default -O set up by cmake, adding ggdb3 for the most verbose devug info
@@ -189,6 +186,10 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   set(CMAKE_${VLLM_GPU_LANG}_FLAGS_DEBUG "${CMAKE_${VLLM_GPU_LANG}_FLAGS_DEBUG} -O0 -ggdb3")
   set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -O0 -ggdb3")
 
+  #
+  # Set rocm version dev int.
+  #
+  list(APPEND VLLM_GPU_FLAGS "-DROCM_VERSION=${ROCM_VERSION_DEV_INT}")
 
   #
   # Certain HIP functions are marked as [[nodiscard]], yet vllm ignores the result which generates
@@ -232,6 +233,8 @@ endif()
 #
 
 set(VLLM_EXT_SRC
+  "csrc/mamba/mamba_ssm/selective_scan_fwd.cu"
+  "csrc/mamba/causal_conv1d/causal_conv1d.cu"
   "csrc/cache_kernels.cu"
   "csrc/attention/paged_attention_v1.cu"
   "csrc/attention/paged_attention_v2.cu"
@@ -287,8 +290,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   FetchContent_MakeAvailable(cutlass)
 
   list(APPEND VLLM_EXT_SRC
-    "csrc/mamba/mamba_ssm/selective_scan_fwd.cu"
-    "csrc/mamba/causal_conv1d/causal_conv1d.cu"
     "csrc/quantization/aqlm/gemm_kernels.cu"
     "csrc/quantization/awq/gemm_kernels.cu"
     "csrc/permute_cols.cu"
@@ -769,7 +770,9 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   set(VLLM_ROCM_EXT_SRC
     "csrc/rocm/torch_bindings.cpp"
     "csrc/rocm/skinny_gemms.cu"
-    "csrc/rocm/attention.cu")
+    "csrc/rocm/attention.cu"
+    "csrc/rocm/fused_kernels.cu"
+    "csrc/rocm/custom.cu")
 
   define_gpu_extension_target(
     _rocm_C

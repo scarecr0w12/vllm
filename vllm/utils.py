@@ -205,6 +205,145 @@ class _Sentinel:
 ALL_PINNED_SENTINEL = _Sentinel()
 
 
+class rpd_trace:
+
+    def __init__(self,
+                 filename=None,
+                 name=None,
+                 nvtx=False,
+                 args=None,
+                 skip=False):
+        self.skip = skip
+        if not self.skip:
+            self.name = name
+            self.args = args if args else ""
+            self.rpd = self.initialize_rpd_tracer(filename, nvtx)
+
+    def _recreate_cm(self):
+        return self
+
+    def __call__(self, func):
+        if not self.skip:
+            if self.name:
+                self.name += f"{func.__name__}"
+            else:
+                self.name = f"{func.__qualname__}"
+
+            @wraps(func)
+            def inner(*args, **kwds):
+                with self._recreate_cm():
+                    return func(*args, **kwds)
+
+            return inner
+        return func
+
+    def __enter__(self):
+        if not self.skip:
+            self.rpd.__enter__()
+            self.rpd.rangePush("python", f"{self.name}", f"{self.args}")
+        return self
+
+    def __exit__(self, *exc):
+        if not self.skip:
+            self.rpd.rangePop()
+            self.rpd.__exit__(None, None, None)
+        return False
+
+    @staticmethod
+    def setup_environment_variables(filename):
+        os.environ['RPDT_AUTOSTART'] = '0'
+        os.environ['RPDT_FILENAME'] = filename
+
+    def initialize_rpd_tracer(self, filename, nvtx):
+        try:
+            from rpdTracerControl import rpdTracerControl
+            rpd_trace.setup_environment_variables(filename)
+            rpdTracerControl.setFilename(name=filename, append=True)
+            return rpdTracerControl(nvtx=nvtx)
+        except Exception as e:
+            print(f"Error initializing rpdTracerControl: {e}")
+            raise
+
+    @staticmethod
+    def create_file(filename):
+        import sqlite3
+
+        from rocpd.schema import RocpdSchema
+        try:
+            print("Creating empty rpd schema file ...")
+            filename = str(filename)
+            with sqlite3.connect(filename) as connection:
+                schema = RocpdSchema()
+                schema.writeSchema(connection)
+                connection.commit()
+        except sqlite3.OperationalError as e:
+            print(f"SQLite operational error: {e}")
+        except Exception as e:
+            print(f"An error occurred while creating the filename: {e}")
+
+
+@cache
+def is_hipScopedMarker_available():
+    try:
+        from hipScopedMarker import hipScopedMarker
+    except ImportError:
+        hipScopedMarker = None
+    return hipScopedMarker is not None
+
+
+class rpd_mark:
+
+    def __init__(self, name=None):
+        self.name = name
+
+    def __call__(self, func):
+
+        if is_hipScopedMarker_available():
+            from hipScopedMarker import hipScopedMarker
+
+            @wraps(func)
+            def inner(*args, **kwds):
+                marker_name = self.name if self.name else f"{func.__name__}"
+                with hipScopedMarker(f"{marker_name}"):
+                    return func(*args, **kwds)
+
+            return inner
+
+        else:
+            return func
+
+
+class rpd_user_marker:
+
+    def __init__(self, name=None):
+        self.name = name
+        self.marker = None
+
+    def __enter__(self):
+        if is_hipScopedMarker_available():
+            from hipScopedMarker import hipScopedMarker
+            marker_name = self.name if self.name else "UserMarker Undefined"
+            self.marker = hipScopedMarker(f"{marker_name}")
+            self.marker.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if is_hipScopedMarker_available() and self.marker:
+            self.marker.__exit__(exc_type, exc_val, exc_tb)
+
+    def start(self):
+        if is_hipScopedMarker_available():
+            from hipScopedMarker import hipScopedMarker
+            marker_name = self.name if self.name else "UserMarker Undefined"
+            self.marker = hipScopedMarker(f"{marker_name}")
+            self.marker.__enter__()
+        return self
+
+    def end(self, exc_type=0, exc_val=0, exc_tb=0):
+        if is_hipScopedMarker_available() and self.marker:
+            self.marker.__exit__(exc_type, exc_val, exc_tb)
+
+
 class Device(enum.Enum):
     GPU = enum.auto()
     CPU = enum.auto()
@@ -476,6 +615,16 @@ class PyObjectCache:
         """Makes all cached-objects available for the next scheduler iteration.
         """
         self._index = 0
+
+
+@cache
+def is_mi250() -> bool:
+    from vllm.platforms import current_platform
+    if not current_platform.is_rocm() or not torch.cuda.is_available():
+        return False
+    archName = torch.cuda.get_device_properties('cuda').gcnArchName
+    return (archName is not None) and \
+        ("gfx90a" in archName)
 
 
 @cache
@@ -759,16 +908,15 @@ def get_kv_cache_torch_dtype(
         model_dtype: Optional[Union[str, torch.dtype]] = None) -> torch.dtype:
     if isinstance(cache_dtype, str):
         if cache_dtype == "auto":
-            if isinstance(model_dtype, str):
+            if isinstance(model_dtype,
+                          str) and model_dtype in STR_DTYPE_TO_TORCH_DTYPE:
                 torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[model_dtype]
             elif isinstance(model_dtype, torch.dtype):
                 torch_dtype = model_dtype
             else:
                 raise ValueError(f"Invalid model dtype: {model_dtype}")
-        elif cache_dtype in ["half", "bfloat16", "float"]:
+        elif cache_dtype in STR_DTYPE_TO_TORCH_DTYPE:
             torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_dtype]
-        elif cache_dtype == "fp8":
-            torch_dtype = torch.uint8
         else:
             raise ValueError(f"Invalid kv cache dtype: {cache_dtype}")
     elif isinstance(cache_dtype, torch.dtype):
@@ -1005,7 +1153,7 @@ def flatten_2d_lists(lists: Iterable[Iterable[T]]) -> list[T]:
 
 def full_groupby(values: Iterable[_V], *, key: Callable[[_V], _K]):
     """
-    Unlike {class}`itertools.groupby`, groups are not broken by
+    Unlike [`itertools.groupby`][], groups are not broken by
     non-contiguous data.
     """
     groups = defaultdict[_K, list[_V]](list)
@@ -1855,6 +2003,28 @@ def weak_ref_tensor(tensor: Any) -> Any:
         return tensor
 
 
+@cache
+def is_navi() -> bool:
+    from vllm.platforms import current_platform
+    if not current_platform.is_rocm() or not torch.cuda.is_available():
+        return False
+    # All (visible) GPUs must be of the same type,
+    # otherwise FP8 results can't be guaranteed.
+    archName = torch.cuda.get_device_properties('cuda').gcnArchName
+    return archName is not None and "gfx1" in archName
+
+
+@cache
+def is_navi3() -> bool:
+    from vllm.platforms import current_platform
+    if not current_platform.is_rocm() or not torch.cuda.is_available():
+        return False
+    # All (visible) GPUs must be of the same type,
+    # otherwise FP8 results can't be guaranteed.
+    archName = torch.cuda.get_device_properties('cuda').gcnArchName
+    return archName is not None and "gfx11" in archName
+
+
 def weak_ref_tensors(
     tensors: Union[torch.Tensor, list[torch.Tensor], tuple[torch.Tensor]]
 ) -> Union[torch.Tensor, list[Any], tuple[Any], Any]:
@@ -1926,7 +2096,8 @@ class _PlaceholderBase:
     Disallows downstream usage of placeholder modules.
 
     We need to explicitly override each dunder method because
-    {meth}`__getattr__` is not called when they are accessed.
+    [`__getattr__`][vllm.utils._PlaceholderBase.__getattr__]
+    is not called when they are accessed.
 
     Info:
         [Special method lookup](https://docs.python.org/3/reference/datamodel.html#special-lookup)

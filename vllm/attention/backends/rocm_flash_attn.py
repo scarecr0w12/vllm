@@ -535,7 +535,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 f"Head size {head_size} is not supported by PagedAttention. "
                 f"Supported head sizes are: {supported_head_sizes}.")
 
-        self.use_naive_attn = False
+        self.use_naive_attn = envs.VLLM_USE_SDPA_ATTENTION  # Default False
         # NOTE: Allow for switching between Triton and CK. Defaulting to triton.
         self.use_triton_flash_attn = envs.VLLM_USE_TRITON_FLASH_ATTN
         if self.use_triton_flash_attn:
@@ -766,12 +766,12 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                             query.dtype,
                             seq_lens,
                             make_attn_mask=causal_mask)  # type: ignore
-                    use_fp8_scales = (layer._q_scale and layer._k_scale
-                                      and layer._v_scale and layer._prob_scale
-                                      and self.kv_cache_dtype == "fp8")
                     full_scales = (
-                        layer._q_scale, layer._k_scale, layer._v_scale,
-                        layer._prob_scale) if use_fp8_scales else None
+                        layer._q_scale.item(), layer._k_scale.item(),
+                        layer._v_scale.item(), layer._prob_scale.item()) if (
+                            layer._out_scale and layer._q_scale
+                            and layer._prob_scale
+                            and envs.VLLM_USE_ROCM_FP8_FLASH_ATTN) else None
                     self.triton_attn_func(
                         query,
                         key,
@@ -786,6 +786,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                         attn_masks[0][None]
                         if attn_masks is not None else None,
                         full_scales,
+                        layer._out_scale,
                     )
                 elif self.use_naive_attn:
                     if self.num_kv_heads != self.num_heads:
@@ -812,6 +813,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                         self.num_heads,
                         self.head_size,
                         self.scale,
+                        causal_mask,
                         attn_masks,
                     )
                 else:
@@ -874,7 +876,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 assert _PARTITION_SIZE_ROCM % block_size == 0
                 tmp_output = torch.empty(
                     size=(num_seqs, num_heads, max_num_partitions, head_size),
-                    dtype=output.dtype,
+                    dtype=query.dtype,
                     device=output.device,
                 )
                 exp_sums = torch.empty(
@@ -908,6 +910,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                     self.kv_cache_dtype,
                     layer._k_scale,
                     layer._v_scale,
+                    layer._out_scale,
                 )
             else:
                 output[num_prefill_tokens:] = paged_attn.forward_decode(
@@ -945,6 +948,7 @@ def _sdpa_attention(
     num_heads: int,
     head_size: int,
     scale: float,
+    is_causal: bool,
     attn_masks: Optional[List[torch.Tensor]] = None,
 ) -> torch.Tensor:
     start = 0
@@ -961,7 +965,7 @@ def _sdpa_attention(
                 key[:, start:end, :],
                 value[:, start:end, :],
                 dropout_p=0.0,
-                is_causal=attn_masks is None,
+                is_causal=is_causal,
                 attn_mask=attn_masks[i] if attn_masks else None,
                 scale=scale).movedim(query.dim() - 2, 0)
             output[start:end, :, :] = sub_out
