@@ -1,10 +1,10 @@
-ARG BASE_IMAGE=rocm/dev-ubuntu-22.04:6.4-complete
-ARG HIPBLASLT_BRANCH="aa0bda7b"
-ARG HIPBLAS_COMMON_BRANCH="9b80ba8e"
+ARG BASE_IMAGE=rocm/dev-ubuntu-24.04:6.4.1-complete
+ARG HIPBLASLT_BRANCH="main"
+ARG HIPBLAS_COMMON_BRANCH="main"
 ARG LEGACY_HIPBLASLT_OPTION=
-ARG TRITON_BRANCH="981e987e"
+ARG TRITON_BRANCH="main"
 ARG TRITON_REPO="https://github.com/triton-lang/triton.git"
-ARG PYTORCH_BRANCH="295f2ed4"
+ARG PYTORCH_BRANCH="main"
 ARG PYTORCH_VISION_BRANCH="v0.21.0"
 ARG PYTORCH_REPO="https://github.com/pytorch/pytorch.git"
 ARG PYTORCH_VISION_REPO="https://github.com/pytorch/vision.git"
@@ -18,7 +18,7 @@ FROM ${BASE_IMAGE} AS base
 ENV PATH=/opt/rocm/llvm/bin:$PATH
 ENV ROCM_PATH=/opt/rocm
 ENV LD_LIBRARY_PATH=/opt/rocm/lib:/usr/local/lib:
-ARG PYTORCH_ROCM_ARCH=gfx90a;gfx942;gfx1100;gfx1101;gfx1200;gfx1201
+ARG PYTORCH_ROCM_ARCH=gfx1100;gfx1101
 ENV PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH}
 
 ARG PYTHON_VERSION=3.12
@@ -26,6 +26,9 @@ ARG PYTHON_VERSION=3.12
 RUN mkdir -p /app
 WORKDIR /app
 ENV DEBIAN_FRONTEND=noninteractive
+# Allow pip to install packages in the system Python directory within the Docker container.
+# This is to address the "externally managed environment" error (PEP 668).
+ENV PIP_BREAK_SYSTEM_PACKAGES=1
 
 # Install Python and other dependencies
 RUN apt-get update -y \
@@ -34,16 +37,16 @@ RUN apt-get update -y \
         add-apt-repository -y ppa:deadsnakes/ppa && break || \
         { echo "Attempt $i failed, retrying in 5s..."; sleep 5; }; \
     done \
-    && apt-get update -y \
+    && apt-get upgrade -y \
     && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
        python${PYTHON_VERSION}-lib2to3 python-is-python3  \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
     && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
     && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
-    && curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
+    && apt-get install -y python3-pip python3-wheel python3-setuptools cmake \
     && python3 --version && python3 -m pip --version
 
-RUN pip install -U packaging 'cmake<4' ninja wheel 'setuptools<80' pybind11 Cython
+RUN pip install -U packaging ninja pybind11 Cython
 
 FROM base AS build_hipblaslt
 ARG HIPBLASLT_BRANCH
@@ -57,7 +60,7 @@ RUN cd hipBLAS-common \
     && mkdir build \
     && cd build \
     && cmake .. \
-    && make package \
+    && make package -j$(nproc)\
     && dpkg -i ./*.deb
 RUN git clone https://github.com/ROCm/hipBLASLt
 RUN cd hipBLASLt \
@@ -72,10 +75,28 @@ FROM base AS build_triton
 ARG TRITON_BRANCH
 ARG TRITON_REPO
 RUN git clone ${TRITON_REPO}
-RUN cd triton \
-    && git checkout ${TRITON_BRANCH} \
-    && cd python \
-    && python3 setup.py bdist_wheel --dist-dir=dist
+ARG TRITON_BUILD_PARALLELISM
+RUN \
+    # Logic to determine effective parallelism
+    EFFECTIVE_PARALLELISM_VALUE=$TRITON_BUILD_PARALLELISM && \
+    if [ -z "$EFFECTIVE_PARALLELISM_VALUE" ]; then \
+        if [ -f /proc/cpuinfo ]; then \
+            # If /proc/cpuinfo exists, use the number of processors
+            EFFECTIVE_PARALLELISM_VALUE=$(grep -c ^processor /proc/cpuinfo); \
+        else \
+            # Fallback to a safer default (e.g., 8 or 12)
+            EFFECTIVE_PARALLELISM_VALUE=12; \
+        fi; \
+    fi && \
+    echo "Building Triton with MAX_JOBS=${EFFECTIVE_PARALLELISM_VALUE}" && \
+    \
+    # Your original commands, now with MAX_JOBS
+    cd triton && \
+    git checkout ${TRITON_BRANCH} && \
+    # (Optional: Apply any patches if you have them)
+    # if [ -d /app/triton_patches ]; then git apply /app/triton_patches/*.patch; fi && \
+    cd python && \
+    MAX_JOBS=${EFFECTIVE_PARALLELISM_VALUE} python3 setup.py bdist_wheel --dist-dir=dist
 RUN mkdir -p /app/install && cp /app/triton/python/dist/*.whl /app/install
 
 FROM base AS build_amdsmi
@@ -91,11 +112,13 @@ ARG PYTORCH_VISION_REPO
 ARG FA_BRANCH
 ARG FA_REPO
 RUN git clone ${PYTORCH_REPO} pytorch
+
 RUN cd pytorch && git checkout ${PYTORCH_BRANCH} && \
     pip install -r requirements.txt && git submodule update --init --recursive \
     && python3 tools/amd_build/build_amd.py \
     && CMAKE_PREFIX_PATH=$(python3 -c 'import sys; print(sys.prefix)') python3 setup.py bdist_wheel --dist-dir=dist \
     && pip install dist/*.whl
+
 RUN git clone ${PYTORCH_VISION_REPO} vision
 RUN cd vision && git checkout ${PYTORCH_VISION_BRANCH} \
     && python3 setup.py bdist_wheel --dist-dir=dist \
@@ -119,7 +142,7 @@ RUN cd aiter \
     && git checkout ${AITER_BRANCH} \
     && git submodule update --init --recursive \
     && pip install -r requirements.txt
-RUN pip install pyyaml && cd aiter && PREBUILD_KERNELS=1 GPU_ARCHS=gfx942 python3 setup.py bdist_wheel --dist-dir=dist && ls /app/aiter/dist/*.whl
+RUN pip install pyyaml && cd aiter && PREBUILD_KERNELS=1 GPU_ARCHS=gfx1100 python3 setup.py bdist_wheel --dist-dir=dist && ls /app/aiter/dist/*.whl
 RUN mkdir -p /app/install && cp /app/aiter/dist/*.whl /app/install
 
 FROM base AS debs
