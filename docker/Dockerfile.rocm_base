@@ -1,6 +1,6 @@
 ARG BASE_IMAGE=rocm/dev-ubuntu-24.04:6.4.1-complete
-ARG HIPBLASLT_BRANCH="main"
-ARG HIPBLAS_COMMON_BRANCH="main"
+ARG HIPBLASLT_BRANCH="develop"
+ARG HIPBLAS_COMMON_BRANCH="develop"
 ARG LEGACY_HIPBLASLT_OPTION=
 ARG TRITON_BRANCH="main"
 ARG TRITON_REPO="https://github.com/triton-lang/triton.git"
@@ -87,16 +87,29 @@ RUN \
             # Fallback to a safer default (e.g., 8 or 12)
             EFFECTIVE_PARALLELISM_VALUE=12; \
         fi; \
-    fi && \
-    echo "Building Triton with MAX_JOBS=${EFFECTIVE_PARALLELISM_VALUE}" && \
-    \
-    # Your original commands, now with MAX_JOBS
-    cd triton && \
-    git checkout ${TRITON_BRANCH} && \
+    fi \
+    && echo "Building Triton with MAX_JOBS=${EFFECTIVE_PARALLELISM_VALUE}" \
+    && cd triton  \
+    && git checkout ${TRITON_BRANCH} \
+    && echo "Current directory before submodule update: $(pwd)" \
+    && echo "Attempting submodule update with progress..." \
+    && git submodule update --init --recursive --progress || (echo "Submodule update FAILED with exit code $?" >&2; exit 1) \
+    && echo "Submodule update command finished. Verifying /app/triton/third_party..." \
+    && ls -la /app/triton \
+    && if [ ! -d "/app/triton/third_party" ]; then \
+        echo "Error: /app/triton/third_party directory NOT FOUND after submodule update!" >&2; \
+        exit 1; \
+    elif [ -z "$(ls -A /app/triton/third_party)" ]; then \
+        echo "Error: /app/triton/third_party directory IS EMPTY after submodule update!" >&2; \
+        ls -la /app/triton/third_party; \
+        exit 1; \
+    fi \
+    && echo "/app/triton/third_party directory exists and is not empty." \
     # (Optional: Apply any patches if you have them)
     # if [ -d /app/triton_patches ]; then git apply /app/triton_patches/*.patch; fi && \
-    cd python && \
-    MAX_JOBS=${EFFECTIVE_PARALLELISM_VALUE} python3 setup.py bdist_wheel --dist-dir=dist
+    && echo "Current directory before running setup.py: $(pwd)" \
+    && ls -l \
+    && MAX_JOBS=${EFFECTIVE_PARALLELISM_VALUE} python3 setup.py bdist_wheel --dist-dir=dist
 RUN mkdir -p /app/install && cp /app/triton/python/dist/*.whl /app/install
 
 FROM base AS build_amdsmi
